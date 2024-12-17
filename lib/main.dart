@@ -79,7 +79,6 @@ class _MapScreenState extends State<MapScreen> {
     _destinationController.dispose();
     super.dispose();
   }
-
   Future<void> _getCurrentLocation() async {
     setState(() {
       _isLoading = true;
@@ -128,34 +127,50 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  Future<void> _updateOriginAddress() async {
-    if (_currentPosition == null) return;
+  Future<void> _getCurrentPositionFallback() async {
+  try {
+    Position position = await Geolocator.getLastKnownPosition() ??
+        await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.bestForNavigation,
+          timeLimit: const Duration(seconds: 30)
+        );
 
-    String url = 'https://nominatim.openstreetmap.org/reverse?format=json'
-        '&lat=${_currentPosition!.latitude}'
-        '&lon=${_currentPosition!.longitude}';
-
-    try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        var data = json.decode(response.body);
-        if (!mounted) return;
-        setState(() {
-          _originController.text = data['display_name'];
-        });
-      }
-    } catch (e) {
-      if (!mounted) return;
-      _showError('Erreur lors de la récupération de l\'adresse');
-    }
-  }
-
-  void _showError(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+
+    LatLng realPosition = LatLng(position.latitude, position.longitude);
+    _snappedPosition = _snapToRoute(realPosition);
+
+    setState(() {
+      _currentPosition = _snappedPosition;
+      if (_currentPosition != null) {
+        _navigationTrack.add(_currentPosition!);
+      }
+      _updateMarkers();
+
+      if (_currentPosition != null) {
+        _mapController.moveAndRotate(
+          _currentPosition!,
+          _mapController.zoom,
+          _bearing,
+        );
+      }
+
+      // Update distance calculations
+      if (_destination != null && _currentPosition != null) {
+        _distanceToDestination = _calculateRouteDistance(
+          _currentPosition!,
+          _destination!,
+        );
+        _estimatedTime = Duration(
+          seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
+        );
+      }
+    });
+  } catch (e) {
+    if (!mounted) return;
+    _showError('Erreur de localisation: $e');
   }
+}
 
   void _startNavigation() async {
     LocationPermission permission = await Geolocator.checkPermission();
@@ -185,30 +200,25 @@ class _MapScreenState extends State<MapScreen> {
       _positionStreamSubscription = Geolocator.getPositionStream(
         locationSettings: locationSettings,
       ).listen(
-            (Position position) {
+        (Position position) {
           if (!mounted) return;
 
           LatLng realPosition = LatLng(position.latitude, position.longitude);
           _snappedPosition = _snapToRoute(realPosition);
           _calculateBearing();
 
+          // Update distance and time calculations
+          if (_destination != null) {
+            _distanceToDestination = _calculateRouteDistance(_snappedPosition!, _destination!);
+            _estimatedTime = Duration(
+              seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
+            );
+          }
+
           setState(() {
             _currentPosition = _snappedPosition;
             _navigationTrack.add(_currentPosition!);
             _updateMarkers();
-
-            if (_destination != null) {
-              _distanceToDestination = Geolocator.distanceBetween(
-                position.latitude,
-                position.longitude,
-                _destination!.latitude,
-                _destination!.longitude,
-              );
-
-              _estimatedTime = Duration(
-                  seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
-              );
-            }
 
             _mapController.moveAndRotate(
               _currentPosition!,
@@ -224,20 +234,37 @@ class _MapScreenState extends State<MapScreen> {
         },
         cancelOnError: false,
       );
-
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Navigation démarrée - Suivi GPS activé'),
-          duration: Duration(seconds: 2),
-        ),
-      );
     } catch (e) {
       if (!mounted) return;
       _showError('Erreur lors du démarrage de la navigation: $e');
       _stopNavigation();
     }
+  }
+
+  double _calculateRouteDistance(LatLng start, LatLng end) {
+    if (_remainingRoute.isEmpty) {
+      return Geolocator.distanceBetween(
+        start.latitude,
+        start.longitude,
+        end.latitude,
+        end.longitude,
+      );
+    }
+
+    double totalDistance = 0;
+    LatLng previousPoint = start;
+
+    for (var point in _remainingRoute) {
+      totalDistance += Geolocator.distanceBetween(
+        previousPoint.latitude,
+        previousPoint.longitude,
+        point.latitude,
+        point.longitude,
+      );
+      previousPoint = point;
+    }
+
+    return totalDistance;
   }
 
   void _stopNavigation() {
@@ -253,45 +280,25 @@ class _MapScreenState extends State<MapScreen> {
       _mapController.rotate(0);
     });
   }
+   Future<void> _updateOriginAddress() async {
+    if (_currentPosition == null) return;
 
-  void _calculateBearing() {
-    if (_remainingRoute.length > 1) {
-      _bearing = Geolocator.bearingBetween(
-        _snappedPosition!.latitude,
-        _snappedPosition!.longitude,
-        _remainingRoute[1].latitude,
-        _remainingRoute[1].longitude,
-      );
-      _mapController.rotate(_bearing);
-    }
-  }
+    String url = 'https://nominatim.openstreetmap.org/reverse?format=json'
+        '&lat=${_currentPosition!.latitude}'
+        '&lon=${_currentPosition!.longitude}';
 
-  Future<void> _getCurrentPositionFallback() async {
     try {
-      Position position = await Geolocator.getLastKnownPosition() ??
-          await Geolocator.getCurrentPosition(
-              desiredAccuracy: LocationAccuracy.bestForNavigation,
-              timeLimit: const Duration(seconds: 30)
-          );
-
-      if (!mounted) return;
-
-      LatLng realPosition = LatLng(position.latitude, position.longitude);
-      _snappedPosition = _snapToRoute(realPosition);
-
-      setState(() {
-        _currentPosition = _snappedPosition;
-        _navigationTrack.add(_currentPosition!);
-        _updateMarkers();
-        _mapController.moveAndRotate(
-          _currentPosition!,
-          _mapController.zoom,
-          _bearing,
-        );
-      });
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        var data = json.decode(response.body);
+        if (!mounted) return;
+        setState(() {
+          _originController.text = data['display_name'];
+        });
+      }
     } catch (e) {
       if (!mounted) return;
-      _showError('Erreur de localisation: $e');
+      _showError('Erreur lors de la récupération de l\'adresse');
     }
   }
 
@@ -378,6 +385,18 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  void _calculateBearing() {
+    if (_remainingRoute.length > 1) {
+      _bearing = Geolocator.bearingBetween(
+        _snappedPosition!.latitude,
+        _snappedPosition!.longitude,
+        _remainingRoute[1].latitude,
+        _remainingRoute[1].longitude,
+      );
+      _mapController.rotate(_bearing);
+    }
+  }
+
   LatLng _snapToRoute(LatLng position) {
     if (_routePoints.isEmpty) return position;
 
@@ -440,18 +459,7 @@ class _MapScreenState extends State<MapScreen> {
       });
     }
   }
-
-  void _fitRoute() {
-    if (_routePoints.isEmpty) return;
-
-    var bounds = LatLngBounds.fromPoints(_routePoints);
-    _mapController.fitBounds(
-      bounds,
-      options: const FitBoundsOptions(padding: EdgeInsets.all(50.0)),
-    );
-  }
-
-  void _updateMarkers() {
+   void _updateMarkers() {
     setState(() {
       _markers.clear();
       if (_currentPosition != null) {
@@ -484,6 +492,16 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
+  void _fitRoute() {
+    if (_routePoints.isEmpty) return;
+
+    var bounds = LatLngBounds.fromPoints(_routePoints);
+    _mapController.fitBounds(
+      bounds,
+      options: const FitBoundsOptions(padding: EdgeInsets.all(50.0)),
+    );
+  }
+
   void _clearRoute() {
     setState(() {
       _destination = null;
@@ -497,6 +515,86 @@ class _MapScreenState extends State<MapScreen> {
         _stopNavigation();
       }
     });
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  Widget _buildNavigationOverlay() {
+    return Positioned(
+      top: 100,
+      left: 20,
+      right: 20,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.1),
+              spreadRadius: 2,
+              blurRadius: 5,
+            ),
+          ],
+        ),
+        child: Column(
+          children: [
+            Text(
+              _nextInstruction.isEmpty ? 'Suivez la route' : _nextInstruction,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Distance restante:',
+                      style: TextStyle(color: Colors.grey[600]),
+                    ),
+                    Text(
+                      _distanceToDestination >= 1000
+                          ? '${(_distanceToDestination / 1000).toStringAsFixed(1)} km'
+                          : '${_distanceToDestination.toStringAsFixed(0)} m',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'Temps estimé:',
+                      style: TextStyle(color: Colors.grey[600]),
+                    ),
+                    Text(
+                      '${_estimatedTime.inMinutes} min',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -534,9 +632,9 @@ class _MapScreenState extends State<MapScreen> {
                     prefixIcon: const Icon(Icons.search),
                     suffixIcon: _destinationController.text.isNotEmpty
                         ? IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: _clearRoute,
-                    )
+                            icon: const Icon(Icons.clear),
+                            onPressed: _clearRoute,
+                          )
                         : null,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
@@ -673,45 +771,6 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
         ],
-      ),
-    );
-  }
-  Widget _buildNavigationOverlay() {
-    return Positioned(
-      top: 100,
-      left: 20,
-      right: 20,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(10),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.1),
-              spreadRadius: 2,
-              blurRadius: 5,
-            ),
-          ],
-        ),
-        child: Column(
-          children: [
-            Text(
-              _nextInstruction.isEmpty ? 'Suivez la route' : _nextInstruction,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Distance: ${(_distanceToDestination / 1000).toStringAsFixed(1)} km',
-            ),
-            Text(
-              'Temps estimé: ${_estimatedTime.inMinutes} min',
-            ),
-          ],
-        ),
       ),
     );
   }

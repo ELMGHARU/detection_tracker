@@ -11,16 +11,29 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_map: ^6.0.0
+  flutter_map: ^6.0.1
   latlong2: ^0.9.0
-  geolocator: ^10.0.0
+  geolocator: ^10.1.0
   http: ^1.1.0
-
   cupertino_icons: ^1.0.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^5.0.0
+  flutter_lints: ^3.0.1
 
 flutter:
   uses-material-design: true
+
+# Add platform support
+platforms:
+  android:
+  ios:
+  linux:
+  web:
+  windows:
+  macos:
+
+# Additional configurations for packages
+dependency_overrides:
+  # Add any necessary overrides here if needed
