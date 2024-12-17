@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math' show pi;
+import 'dart:io' show Platform;
 
 void main() {
   runApp(const MyApp());
@@ -66,6 +67,8 @@ class _MapScreenState extends State<MapScreen> {
   Duration _estimatedTime = Duration.zero;
   StreamSubscription<Position>? _positionStreamSubscription;
 
+  bool _isLoggingPosition = true; // Control position logging
+
   @override
   void initState() {
     super.initState();
@@ -80,34 +83,41 @@ class _MapScreenState extends State<MapScreen> {
     super.dispose();
   }
   Future<void> _getCurrentLocation() async {
-    setState(() {
-      _isLoading = true;
-    });
+  setState(() {
+    _isLoading = true;
+  });
 
-    try {
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        throw Exception('Les services de localisation sont désactivés');
+  try {
+    if (Platform.isLinux) {
+      if (!mounted) return;
+      setState(() {
+        _currentPosition = LatLng(31.7917, -7.0926);
+        _updateMarkers();
+        _mapController.move(_currentPosition!, 16.0);
+      });
+      
+      if (_isLoggingPosition) {
+        print('\n=== Initial Position (Linux Mock) ===');
+        print('Position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}');
+        print('====================\n');
       }
-
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          throw Exception('Permission de localisation refusée');
-        }
-      }
-
-      if (permission == LocationPermission.deniedForever) {
-        throw Exception('Les permissions de localisation sont définitivement refusées');
-      }
-
+      
+      await _updateOriginAddress();
+    } else {
       Position position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.bestForNavigation
+        desiredAccuracy: LocationAccuracy.bestForNavigation
       );
 
-      if (!mounted) return;
+      if (_isLoggingPosition) {
+        print('\n=== Initial Position ===');
+        print('Position: ${position.latitude}, ${position.longitude}');
+        print('Accuracy: ${position.accuracy} meters');
+        print('Altitude: ${position.altitude} meters');
+        print('Speed: ${position.speed} m/s');
+        print('====================\n');
+      }
 
+      if (!mounted) return;
       setState(() {
         _currentPosition = LatLng(position.latitude, position.longitude);
         _lastPosition = position;
@@ -116,16 +126,18 @@ class _MapScreenState extends State<MapScreen> {
       });
 
       await _updateOriginAddress();
-    } catch (e) {
-      if (!mounted) return;
-      _showError('Erreur de localisation: $e');
-    } finally {
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-      });
     }
+  } catch (e) {
+    if (!mounted) return;
+    print('Location Error: $e');
+    _showError('Erreur de localisation: $e');
+  } finally {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = false;
+    });
   }
+}
 
   Future<void> _getCurrentPositionFallback() async {
   try {
@@ -173,15 +185,8 @@ class _MapScreenState extends State<MapScreen> {
 }
 
   void _startNavigation() async {
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        _showError('Permissions de localisation nécessaires');
-        return;
-      }
-    }
-
+  if (Platform.isLinux) {
+    // Mock navigation for Linux
     setState(() {
       _isNavigating = true;
       _navigationTrack.clear();
@@ -190,56 +195,135 @@ class _MapScreenState extends State<MapScreen> {
       _remainingRoute = List.from(_routePoints);
     });
 
-    const locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 1,
-      timeLimit: Duration(seconds: 30),
-    );
+    // Simulate position updates with logging
+    Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!_isNavigating) {
+        timer.cancel();
+        return;
+      }
 
-    try {
-      _positionStreamSubscription = Geolocator.getPositionStream(
-        locationSettings: locationSettings,
-      ).listen(
-        (Position position) {
-          if (!mounted) return;
-
-          LatLng realPosition = LatLng(position.latitude, position.longitude);
-          _snappedPosition = _snapToRoute(realPosition);
-          _calculateBearing();
-
-          // Update distance and time calculations
+      if (_remainingRoute.isNotEmpty) {
+        setState(() {
+          _currentPosition = _remainingRoute.first;
+          _navigationTrack.add(_currentPosition!);
+          _remainingRoute.removeAt(0);
+          _updateMarkers();
+          
           if (_destination != null) {
-            _distanceToDestination = _calculateRouteDistance(_snappedPosition!, _destination!);
+            _distanceToDestination = _calculateRouteDistance(_currentPosition!, _destination!);
             _estimatedTime = Duration(
               seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
             );
           }
 
-          setState(() {
-            _currentPosition = _snappedPosition;
-            _navigationTrack.add(_currentPosition!);
-            _updateMarkers();
+          // Log position
+          if (_isLoggingPosition) {
+            print('=== Position Update ===');
+            print('Current Position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}');
+            print('Distance to destination: ${_distanceToDestination.toStringAsFixed(2)} meters');
+            print('Estimated time: ${_estimatedTime.inMinutes} minutes');
+            print('Bearing: $_bearing degrees');
+            print('====================\n');
+          }
+        });
+      }
+    });
 
-            _mapController.moveAndRotate(
-              _currentPosition!,
-              _mapController.zoom,
-              _bearing,
-            );
-          });
+    return;
+  }
 
-          _updateNavigationInstructions();
-        },
-        onError: (error) {
-          _getCurrentPositionFallback();
-        },
-        cancelOnError: false,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      _showError('Erreur lors du démarrage de la navigation: $e');
-      _stopNavigation();
+  // For other platforms (actual GPS)
+  LocationPermission permission = await Geolocator.checkPermission();
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
+    if (permission == LocationPermission.denied) {
+      _showError('Permissions de localisation nécessaires');
+      return;
     }
   }
+
+  setState(() {
+    _isNavigating = true;
+    _navigationTrack.clear();
+    _currentStepIndex = 0;
+    _lastRouteIndex = 0;
+    _remainingRoute = List.from(_routePoints);
+  });
+
+  const locationSettings = LocationSettings(
+    accuracy: LocationAccuracy.bestForNavigation,
+    distanceFilter: 1,
+    timeLimit: Duration(seconds: 30),
+  );
+
+  try {
+    _positionStreamSubscription = Geolocator.getPositionStream(
+      locationSettings: locationSettings,
+    ).listen(
+      (Position position) {
+        if (!mounted) return;
+
+        LatLng realPosition = LatLng(position.latitude, position.longitude);
+        _snappedPosition = _snapToRoute(realPosition);
+        _calculateBearing();
+
+        // Log position data
+        if (_isLoggingPosition) {
+          print('\n=== Position Update ===');
+          print('Raw Position: ${position.latitude}, ${position.longitude}');
+          print('Snapped Position: ${_snappedPosition!.latitude}, ${_snappedPosition!.longitude}');
+          print('Speed: ${position.speed} m/s');
+          print('Accuracy: ${position.accuracy} meters');
+          print('Altitude: ${position.altitude} meters');
+          if (_destination != null) {
+            print('Distance to destination: ${_distanceToDestination.toStringAsFixed(2)} meters');
+          }
+          print('Bearing: $_bearing degrees');
+          print('====================\n');
+        }
+
+        setState(() {
+          _currentPosition = _snappedPosition;
+          _navigationTrack.add(_currentPosition!);
+          _updateMarkers();
+
+          if (_destination != null) {
+            _distanceToDestination = _calculateRouteDistance(_currentPosition!, _destination!);
+            _estimatedTime = Duration(
+              seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
+            );
+          }
+
+          _mapController.moveAndRotate(
+            _currentPosition!,
+            _mapController.zoom,
+            _bearing,
+          );
+        });
+
+        _updateNavigationInstructions();
+      },
+      onError: (error) {
+        print('Position Stream Error: $error');
+        _getCurrentPositionFallback();
+      },
+      cancelOnError: false,
+    );
+
+  } catch (e) {
+    if (!mounted) return;
+    print('Navigation Error: $e');
+    _showError('Erreur lors du démarrage de la navigation: $e');
+    _stopNavigation();
+  }
+}
+
+void _togglePositionLogging() {
+  setState(() {
+    _isLoggingPosition = !_isLoggingPosition;
+    print('Position logging ${_isLoggingPosition ? 'enabled' : 'disabled'}');
+  });
+}
 
   double _calculateRouteDistance(LatLng start, LatLng end) {
     if (_remainingRoute.isEmpty) {
@@ -767,6 +851,15 @@ class _MapScreenState extends State<MapScreen> {
                     foregroundColor: Colors.blue,
                   ),
                 ),
+                Positioned(
+                  right: 16,
+                  bottom: 80,
+                  child: FloatingActionButton(
+                    onPressed: _togglePositionLogging,
+                    child: Icon(_isLoggingPosition ? Icons.speaker_notes : Icons.speaker_notes_off),
+                    backgroundColor: Colors.white,
+                    foregroundColor: _isLoggingPosition ? Colors.green : Colors.grey,
+                  ),),
               ],
             ),
           ),
