@@ -6,7 +6,8 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math' show pi;
-import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
+
 
 void main() {
   runApp(const MyApp());
@@ -66,13 +67,12 @@ class _MapScreenState extends State<MapScreen> {
   String _nextInstruction = '';
   Duration _estimatedTime = Duration.zero;
   StreamSubscription<Position>? _positionStreamSubscription;
-
-  bool _isLoggingPosition = true; // Control position logging
+  bool _isLoggingPosition = true;
 
   @override
   void initState() {
     super.initState();
-    _getCurrentLocation();
+    _initializeLocation();
   }
 
   @override
@@ -82,111 +82,145 @@ class _MapScreenState extends State<MapScreen> {
     _destinationController.dispose();
     super.dispose();
   }
-  Future<void> _getCurrentLocation() async {
-  setState(() {
-    _isLoading = true;
-  });
+  Future<void> _initializeLocation() async {
+    if (kIsWeb) {
+      // For web, just get the location directly
+      _getCurrentLocation();
+    } else {
+      // For mobile platforms, check permissions first
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _showError('Les services de localisation sont désactivés');
+        return;
+      }
 
-  try {
-    if (Platform.isLinux) {
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          _showError('Permission de localisation refusée');
+          return;
+        }
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        _showError('Les permissions de localisation sont définitivement refusées');
+        return;
+      }
+
+      _getCurrentLocation();
+    }
+  }
+
+  Future<void> _getCurrentLocation() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      if (kIsWeb) {
+        // Mock location for web testing
+        setState(() {
+          _currentPosition = LatLng(31.7917, -7.0926);
+          _updateMarkers();
+          _mapController.move(_currentPosition!, 16.0);
+        });
+        
+        if (_isLoggingPosition) {
+          print('\n=== Initial Position (Web Mock) ===');
+          print('Position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}');
+          print('====================\n');
+        }
+      } else {
+        Position position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.bestForNavigation
+        );
+
+        if (_isLoggingPosition) {
+          print('\n=== Initial Position ===');
+          print('Position: ${position.latitude}, ${position.longitude}');
+          print('Accuracy: ${position.accuracy} meters');
+          print('Altitude: ${position.altitude} meters');
+          print('Speed: ${position.speed} m/s');
+          print('====================\n');
+        }
+
+        if (!mounted) return;
+        
+        setState(() {
+          _currentPosition = LatLng(position.latitude, position.longitude);
+          _lastPosition = position;
+          _updateMarkers();
+          _mapController.move(_currentPosition!, 16.0);
+        });
+      }
+
+      await _updateOriginAddress();
+    } catch (e) {
+      if (!mounted) return;
+      print('Location Error: $e');
+      _showError('Erreur de localisation: $e');
+    } finally {
       if (!mounted) return;
       setState(() {
-        _currentPosition = LatLng(31.7917, -7.0926);
-        _updateMarkers();
-        _mapController.move(_currentPosition!, 16.0);
+        _isLoading = false;
       });
-      
-      if (_isLoggingPosition) {
-        print('\n=== Initial Position (Linux Mock) ===');
-        print('Position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}');
-        print('====================\n');
+    }
+  }
+
+Future<void> _getCurrentPositionFallback() async {
+    try {
+      if (kIsWeb) {
+        // Mock position for web
+        _handlePositionUpdate(
+          Position(
+            latitude: 31.7917,
+            longitude: -7.0926,
+            timestamp: DateTime.now(),
+            accuracy: 0,
+            altitude: 0,
+            heading: 0,
+            speed: 0,
+            speedAccuracy: 0,
+            altitudeAccuracy: 0,
+            headingAccuracy: 0,
+          ),
+        );
+        return;
       }
-      
-      await _updateOriginAddress();
-    } else {
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.bestForNavigation
+
+      Position? position = await Geolocator.getLastKnownPosition();
+      position ??= await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.best,
+        timeLimit: const Duration(seconds: 30),
       );
 
-      if (_isLoggingPosition) {
-        print('\n=== Initial Position ===');
-        print('Position: ${position.latitude}, ${position.longitude}');
-        print('Accuracy: ${position.accuracy} meters');
-        print('Altitude: ${position.altitude} meters');
-        print('Speed: ${position.speed} m/s');
-        print('====================\n');
-      }
-
       if (!mounted) return;
-      setState(() {
-        _currentPosition = LatLng(position.latitude, position.longitude);
-        _lastPosition = position;
-        _updateMarkers();
-        _mapController.move(_currentPosition!, 16.0);
-      });
 
-      await _updateOriginAddress();
+      bool hasMoved = true;
+      if (_lastPosition != null) {
+        double distance = Geolocator.distanceBetween(
+          _lastPosition!.latitude,
+          _lastPosition!.longitude,
+          position.latitude,
+          position.longitude,
+        );
+        hasMoved = distance > 5; // Only update if moved more than 5 meters
+      }
+
+      if (hasMoved) {
+        _handlePositionUpdate(position);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      print('Fallback Position Error: \$e');
+      _showError('Erreur de localisation: \$e');
     }
-  } catch (e) {
-    if (!mounted) return;
-    print('Location Error: $e');
-    _showError('Erreur de localisation: $e');
-  } finally {
-    if (!mounted) return;
-    setState(() {
-      _isLoading = false;
-    });
   }
-}
 
-  Future<void> _getCurrentPositionFallback() async {
-  try {
-    Position position = await Geolocator.getLastKnownPosition() ??
-        await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.bestForNavigation,
-          timeLimit: const Duration(seconds: 30)
-        );
-
+  Future<void> _startNavigation() async {
     if (!mounted) return;
 
-    LatLng realPosition = LatLng(position.latitude, position.longitude);
-    _snappedPosition = _snapToRoute(realPosition);
-
-    setState(() {
-      _currentPosition = _snappedPosition;
-      if (_currentPosition != null) {
-        _navigationTrack.add(_currentPosition!);
-      }
-      _updateMarkers();
-
-      if (_currentPosition != null) {
-        _mapController.moveAndRotate(
-          _currentPosition!,
-          _mapController.zoom,
-          _bearing,
-        );
-      }
-
-      // Update distance calculations
-      if (_destination != null && _currentPosition != null) {
-        _distanceToDestination = _calculateRouteDistance(
-          _currentPosition!,
-          _destination!,
-        );
-        _estimatedTime = Duration(
-          seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
-        );
-      }
-    });
-  } catch (e) {
-    if (!mounted) return;
-    _showError('Erreur de localisation: $e');
-  }
-}
-
-  void _startNavigation() async {
-  if (Platform.isLinux) {
-    // Mock navigation for Linux
     setState(() {
       _isNavigating = true;
       _navigationTrack.clear();
@@ -195,176 +229,94 @@ class _MapScreenState extends State<MapScreen> {
       _remainingRoute = List.from(_routePoints);
     });
 
-    // Simulate position updates with logging
-    Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!_isNavigating) {
-        timer.cancel();
-        return;
-      }
-
-      if (_remainingRoute.isNotEmpty) {
-        setState(() {
-          _currentPosition = _remainingRoute.first;
-          _navigationTrack.add(_currentPosition!);
-          _remainingRoute.removeAt(0);
-          _updateMarkers();
-          
-          if (_destination != null) {
-            _distanceToDestination = _calculateRouteDistance(_currentPosition!, _destination!);
-            _estimatedTime = Duration(
-              seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
-            );
-          }
-
-          // Log position
-          if (_isLoggingPosition) {
-            print('=== Position Update ===');
-            print('Current Position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}');
-            print('Distance to destination: ${_distanceToDestination.toStringAsFixed(2)} meters');
-            print('Estimated time: ${_estimatedTime.inMinutes} minutes');
-            print('Bearing: $_bearing degrees');
-            print('====================\n');
-          }
-        });
-      }
-    });
-
-    return;
-  }
-
-  // For other platforms (actual GPS)
-  LocationPermission permission = await Geolocator.checkPermission();
-  if (permission == LocationPermission.denied) {
-    permission = await Geolocator.requestPermission();
-    if (permission == LocationPermission.denied) {
-      _showError('Permissions de localisation nécessaires');
-      return;
-    }
-  }
-
-  setState(() {
-    _isNavigating = true;
-    _navigationTrack.clear();
-    _currentStepIndex = 0;
-    _lastRouteIndex = 0;
-    _remainingRoute = List.from(_routePoints);
-  });
-
-  const locationSettings = LocationSettings(
-    accuracy: LocationAccuracy.bestForNavigation,
-    distanceFilter: 1,
-    timeLimit: Duration(seconds: 30),
-  );
-
-  try {
-    _positionStreamSubscription = Geolocator.getPositionStream(
-      locationSettings: locationSettings,
-    ).listen(
-      (Position position) {
-        if (!mounted) return;
-
-        LatLng realPosition = LatLng(position.latitude, position.longitude);
-        _snappedPosition = _snapToRoute(realPosition);
-        _calculateBearing();
-
-        // Log position data
-        if (_isLoggingPosition) {
-          print('\n=== Position Update ===');
-          print('Raw Position: ${position.latitude}, ${position.longitude}');
-          print('Snapped Position: ${_snappedPosition!.latitude}, ${_snappedPosition!.longitude}');
-          print('Speed: ${position.speed} m/s');
-          print('Accuracy: ${position.accuracy} meters');
-          print('Altitude: ${position.altitude} meters');
-          if (_destination != null) {
-            print('Distance to destination: ${_distanceToDestination.toStringAsFixed(2)} meters');
-          }
-          print('Bearing: $_bearing degrees');
-          print('====================\n');
-        }
-
-        setState(() {
-          _currentPosition = _snappedPosition;
-          _navigationTrack.add(_currentPosition!);
-          _updateMarkers();
-
-          if (_destination != null) {
-            _distanceToDestination = _calculateRouteDistance(_currentPosition!, _destination!);
-            _estimatedTime = Duration(
-              seconds: (_distanceToDestination / (50 * 1000 / 3600)).round()
-            );
-          }
-
-          _mapController.moveAndRotate(
-            _currentPosition!,
-            _mapController.zoom,
-            _bearing,
-          );
-        });
-
-        _updateNavigationInstructions();
-      },
-      onError: (error) {
-        print('Position Stream Error: $error');
-        _getCurrentPositionFallback();
-      },
-      cancelOnError: false,
+    final locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 5, // Only update if moved 5 meters
     );
 
-  } catch (e) {
-    if (!mounted) return;
-    print('Navigation Error: $e');
-    _showError('Erreur lors du démarrage de la navigation: $e');
-    _stopNavigation();
-  }
-}
+    try {
+      _positionStreamSubscription = Geolocator.getPositionStream(
+        locationSettings: locationSettings,
+      ).listen(
+        (Position position) {
+          if (!mounted) return;
 
-void _togglePositionLogging() {
-  setState(() {
-    _isLoggingPosition = !_isLoggingPosition;
-    print('Position logging ${_isLoggingPosition ? 'enabled' : 'disabled'}');
-  });
-}
+          // Calculate movement
+          bool hasMoved = true;
+          if (_lastPosition != null) {
+            double distance = Geolocator.distanceBetween(
+              _lastPosition!.latitude,
+              _lastPosition!.longitude,
+              position.latitude,
+              position.longitude,
+            );
+            hasMoved = distance > 5; // Only consider movement if more than 5 meters
+          }
 
-  double _calculateRouteDistance(LatLng start, LatLng end) {
-    if (_remainingRoute.isEmpty) {
-      return Geolocator.distanceBetween(
-        start.latitude,
-        start.longitude,
-        end.latitude,
-        end.longitude,
+          if (hasMoved) {
+            _handlePositionUpdate(position);
+          }
+        },
+        onError: (error) {
+          print('Position Stream Error: $error');
+          _getCurrentPositionFallback();
+        },
+        cancelOnError: false,
       );
+    } catch (e) {
+      if (!mounted) return;
+      print('Navigation Error: $e');
+      _showError('Erreur lors du démarrage de la navigation: $e');
+      _stopNavigation();
     }
-
-    double totalDistance = 0;
-    LatLng previousPoint = start;
-
-    for (var point in _remainingRoute) {
-      totalDistance += Geolocator.distanceBetween(
-        previousPoint.latitude,
-        previousPoint.longitude,
-        point.latitude,
-        point.longitude,
-      );
-      previousPoint = point;
-    }
-
-    return totalDistance;
   }
 
-  void _stopNavigation() {
-    _positionStreamSubscription?.cancel();
+  void _handlePositionUpdate(Position position) {
+    LatLng realPosition = LatLng(position.latitude, position.longitude);
+    _snappedPosition = _snapToRoute(realPosition);
+    _calculateBearing();
+
+    // Log position data
+    if (_isLoggingPosition) {
+      print('\n=== Position Update ===');
+      print('Raw Position: ${position.latitude}, ${position.longitude}');
+      print('Snapped Position: ${_snappedPosition!.latitude}, ${_snappedPosition!.longitude}');
+      print('Speed: ${position.speed} m/s');
+      print('Accuracy: ${position.accuracy} meters');
+      print('Altitude: ${position.altitude} meters');
+      if (_destination != null) {
+        print('Distance to destination: ${_distanceToDestination.toStringAsFixed(2)} meters');
+      }
+      print('Bearing: $_bearing degrees');
+      print('====================\n');
+    }
+
     setState(() {
-      _isNavigating = false;
-      _navigationTrack.clear();
-      _nextInstruction = '';
-      _navigationSteps.clear();
-      _currentStepIndex = 0;
-      _lastRouteIndex = 0;
-      _remainingRoute.clear();
-      _mapController.rotate(0);
+      _currentPosition = _snappedPosition;
+      _lastPosition = position;
+      _navigationTrack.add(_currentPosition!);
+      _updateMarkers();
+
+      if (_destination != null) {
+        _distanceToDestination = _calculateRouteDistance(
+          _currentPosition!,
+          _destination!,
+        );
+        _estimatedTime = Duration(
+          seconds: (_distanceToDestination / (position.speed > 0 ? position.speed : 5)).round()
+        );
+      }
+
+      _mapController.moveAndRotate(
+        _currentPosition!,
+        _mapController.zoom,
+        _bearing,
+      );
     });
+
+    _updateNavigationInstructions();
   }
-   Future<void> _updateOriginAddress() async {
+  Future<void> _updateOriginAddress() async {
     if (_currentPosition == null) return;
 
     String url = 'https://nominatim.openstreetmap.org/reverse?format=json'
@@ -372,7 +324,10 @@ void _togglePositionLogging() {
         '&lon=${_currentPosition!.longitude}';
 
     try {
-      final response = await http.get(Uri.parse(url));
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {'User-Agent': 'NavigationApp/1.0'},
+      );
       if (response.statusCode == 200) {
         var data = json.decode(response.body);
         if (!mounted) return;
@@ -398,7 +353,11 @@ void _togglePositionLogging() {
       String url = 'https://nominatim.openstreetmap.org/search?'
           'format=json&q=$query&limit=5&accept-language=fr';
 
-      final response = await http.get(Uri.parse(url));
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {'User-Agent': 'NavigationApp/1.0'},
+      );
+      
       if (response.statusCode == 200) {
         List<dynamic> data = json.decode(response.body);
         if (!mounted) return;
@@ -424,7 +383,7 @@ void _togglePositionLogging() {
     });
 
     try {
-      String url = 'http://router.project-osrm.org/route/v1/driving/'
+      String url = 'https://router.project-osrm.org/route/v1/driving/'
           '${_currentPosition!.longitude},${_currentPosition!.latitude};'
           '${_destination!.longitude},${_destination!.latitude}'
           '?overview=full&geometries=geojson&steps=true';
@@ -467,6 +426,32 @@ void _togglePositionLogging() {
         _isLoading = false;
       });
     }
+  }
+
+  double _calculateRouteDistance(LatLng start, LatLng end) {
+    if (_remainingRoute.isEmpty) {
+      return Geolocator.distanceBetween(
+        start.latitude,
+        start.longitude,
+        end.latitude,
+        end.longitude,
+      );
+    }
+
+    double totalDistance = 0;
+    LatLng previousPoint = start;
+
+    for (var point in _remainingRoute) {
+      totalDistance += Geolocator.distanceBetween(
+        previousPoint.latitude,
+        previousPoint.longitude,
+        point.latitude,
+        point.longitude,
+      );
+      previousPoint = point;
+    }
+
+    return totalDistance;
   }
 
   void _calculateBearing() {
@@ -512,7 +497,6 @@ void _togglePositionLogging() {
 
     return closestPoint;
   }
-
   void _updateNavigationInstructions() {
     if (_navigationSteps.isEmpty || _currentPosition == null || _destination == null) return;
 
@@ -543,7 +527,8 @@ void _togglePositionLogging() {
       });
     }
   }
-   void _updateMarkers() {
+
+  void _updateMarkers() {
     setState(() {
       _markers.clear();
       if (_currentPosition != null) {
@@ -598,6 +583,27 @@ void _togglePositionLogging() {
       if (_isNavigating) {
         _stopNavigation();
       }
+    });
+  }
+
+  void _stopNavigation() {
+    _positionStreamSubscription?.cancel();
+    setState(() {
+      _isNavigating = false;
+      _navigationTrack.clear();
+      _nextInstruction = '';
+      _navigationSteps.clear();
+      _currentStepIndex = 0;
+      _lastRouteIndex = 0;
+      _remainingRoute.clear();
+      _mapController.rotate(0);
+    });
+  }
+
+  void _togglePositionLogging() {
+    setState(() {
+      _isLoggingPosition = !_isLoggingPosition;
+      print('Position logging ${_isLoggingPosition ? 'enabled' : 'disabled'}');
     });
   }
 
@@ -680,17 +686,18 @@ void _togglePositionLogging() {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Column(
         children: [
+          // Search Bar Container
           Container(
             padding: const EdgeInsets.fromLTRB(16, 40, 16, 16),
             color: Colors.white,
             child: Column(
               children: [
+                // Origin TextField
                 TextField(
                   controller: _originController,
                   decoration: InputDecoration(
@@ -709,6 +716,7 @@ void _togglePositionLogging() {
                   readOnly: true,
                 ),
                 const SizedBox(height: 8),
+                // Destination TextField
                 TextField(
                   controller: _destinationController,
                   decoration: InputDecoration(
@@ -728,6 +736,7 @@ void _togglePositionLogging() {
                   ),
                   onChanged: _searchSuggestion,
                 ),
+                // Search Suggestions
                 if (_searchSuggestions.isNotEmpty)
                   Container(
                     constraints: const BoxConstraints(maxHeight: 200),
@@ -772,9 +781,11 @@ void _togglePositionLogging() {
               ],
             ),
           ),
+          // Map and Navigation Controls
           Expanded(
             child: Stack(
               children: [
+                // Map
                 FlutterMap(
                   mapController: _mapController,
                   options: MapOptions(
@@ -783,10 +794,12 @@ void _togglePositionLogging() {
                     initialRotation: _isNavigating ? _bearing : 0,
                   ),
                   children: [
+                    // Map Tiles
                     TileLayer(
                       urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                       userAgentPackageName: 'com.example.app',
                     ),
+                    // Route Lines
                     PolylineLayer(
                       polylines: [
                         if (_routePoints.isNotEmpty)
@@ -809,10 +822,13 @@ void _togglePositionLogging() {
                           ),
                       ],
                     ),
+                    // Markers
                     MarkerLayer(markers: _markers),
                   ],
                 ),
+                // Navigation Overlay
                 if (_isNavigating) _buildNavigationOverlay(),
+                // Loading Indicator
                 if (_isLoading)
                   Container(
                     color: Colors.black.withOpacity(0.3),
@@ -820,6 +836,7 @@ void _togglePositionLogging() {
                       child: CircularProgressIndicator(),
                     ),
                   ),
+                // Navigation Button
                 if (_destination != null && _routePoints.isNotEmpty)
                   Positioned(
                     bottom: 16,
@@ -841,6 +858,7 @@ void _togglePositionLogging() {
                       label: Text(_isNavigating ? 'Arrêter' : 'Commencer la navigation'),
                     ),
                   ),
+                // Location Button
                 Positioned(
                   right: 16,
                   bottom: 16,
@@ -851,6 +869,7 @@ void _togglePositionLogging() {
                     foregroundColor: Colors.blue,
                   ),
                 ),
+                // Logging Toggle Button
                 Positioned(
                   right: 16,
                   bottom: 80,
@@ -859,7 +878,8 @@ void _togglePositionLogging() {
                     child: Icon(_isLoggingPosition ? Icons.speaker_notes : Icons.speaker_notes_off),
                     backgroundColor: Colors.white,
                     foregroundColor: _isLoggingPosition ? Colors.green : Colors.grey,
-                  ),),
+                  ),
+                ),
               ],
             ),
           ),
