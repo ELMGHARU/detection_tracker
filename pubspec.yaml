@@ -1,0 +1,26 @@
+name: ambulance_tracker
+description: "A new Flutter project."
+
+publish_to: 'none'  # Ne pas publier sur pub.dev
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.4 <4.0.0"  # Assurez-vous d'utiliser la bonne plage pour le SDK Flutter
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_map: ^6.0.0
+  latlong2: ^0.9.0
+  geolocator: ^10.0.0
+  http: ^1.1.0
+
+  cupertino_icons: ^1.0.2
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
